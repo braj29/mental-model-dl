@@ -50,6 +50,9 @@ def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3):
     """
     model.train()
     gate_log = []
+    total_batches = len(loader) * epochs
+    warmup_batches = total_batches // 5   # first 20% of task = warmup, gate target = 1
+    batch_idx = 0
     for _ in range(epochs):
         for x, y in loader:
             x, y = x.to(device), y.to(device)
@@ -61,14 +64,16 @@ def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3):
             gate = info.get("gate_value")
             if gate is not None and torch.is_tensor(gate):
                 gate_log.append(float(gate.detach().mean()))
-                # teach the gate to track uncertainty: high entropy → gate open
                 entropy = info.get("entropy")
                 if entropy is not None and gate.requires_grad:
-                    gate_target = entropy.clamp(0, 1).detach()
+                    # warmup: force gate open for novelty; then track entropy for selectivity
+                    warmup_w = max(0.0, 1.0 - batch_idx / max(warmup_batches, 1))
+                    gate_target = warmup_w + (1 - warmup_w) * entropy.clamp(0, 1).detach()
                     loss = loss + 0.05 * F.mse_loss(gate.mean(), gate_target)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
+            batch_idx += 1
     return float(loss.detach()), gate_log
 
 

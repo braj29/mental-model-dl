@@ -97,7 +97,7 @@ class LearnedGate(nn.Module):
         state_expanded = new_state.unsqueeze(0).expand(feats.size(0), -1)  # (B, state_dim)
         gate_in = torch.cat([feats, state_expanded], dim=-1)     # (B, 3+state_dim)
         gate_per_sample = torch.sigmoid(self.net(gate_in)).squeeze(-1)  # (B,)
-        gate = gate_per_sample.mean()                            # scalar for model.py compatibility
+        gate = 0.1 + 0.9 * gate_per_sample.mean()               # floor at 0.1 — never fully closes
         # update self-state (detached so it acts as slow-moving memory)
         self.running_state = new_state.detach()
         return gate, {"entropy": batch_feats[0].detach(), "gate": gate_per_sample.detach()}
