@@ -70,6 +70,9 @@ def run_one_seed(args, seed):
     )
 
     configs = build_configs(num_classes, args.slots, args.dim)
+    if args.configs:
+        configs = {k: v for k, v in configs.items()
+                   if any(kw.lower() in k.lower() for kw in args.configs)}
     os.makedirs("results", exist_ok=True)
     seed_results = {}
 
@@ -108,6 +111,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0, help="single seed (ignored if --seeds is set)")
     ap.add_argument("--seeds", type=int, nargs="+", help="run multiple seeds, e.g. --seeds 0 1 2")
     ap.add_argument("--quick", action="store_true", help="tiny run for debugging")
+    ap.add_argument("--configs", type=str, nargs="+",
+                    help="keywords to filter configs, e.g. --configs handcrafted learned")
     args = ap.parse_args()
 
     seeds = args.seeds if args.seeds else [args.seed]
