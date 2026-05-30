@@ -1,0 +1,7 @@
+torch>=2.0
+torchvision>=0.15
+numpy>=1.23
+# optional swap-ins referenced in code comments:
+# hypnettorch>=0.0.4        # production hypernetworks (Level 2)
+# avalanche-lib>=0.4        # richer continual-learning benchmarks
+# pytest>=7.0               # for tests/

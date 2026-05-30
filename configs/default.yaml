@@ -1,0 +1,22 @@
+# Default experiment configuration.
+# Override on the command line, e.g.:
+#   PYTHONPATH=. python scripts/run_experiment.py --tasks 20 --epochs 10
+
+experiment:
+  tasks: 10            # number of sequential tasks (Split-CIFAR-100: 10 x 10 classes)
+  epochs_per_task: 5
+  batch_size: 128
+  lr: 1.0e-3
+  seed: 0
+
+model:
+  num_slots: 8         # Level 1 concept slots
+  concept_dim: 64      # concept vector dimensionality
+  aux_weight: 0.3      # weight on the auxiliary base-prediction loss
+
+level3:
+  gate_type: learned   # handcrafted | learned | none
+  gate_threshold: 0.4  # only used by the handcrafted gate
+
+baselines:
+  ewc_lambda: 1000.0

@@ -1,0 +1,28 @@
+[project]
+name = "mental-model-dl"
+version = "0.1.0"
+description = "Three-level mental model network for concept learning and controlled adaptation"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+extras = [
+    "hypnettorch>=0.0.4",
+    "avalanche-lib>=0.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
