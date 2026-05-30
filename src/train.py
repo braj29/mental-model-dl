@@ -61,6 +61,11 @@ def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3):
             gate = info.get("gate_value")
             if gate is not None and torch.is_tensor(gate):
                 gate_log.append(float(gate.detach().mean()))
+                # teach the gate to track uncertainty: high entropy → gate open
+                entropy = info.get("entropy")
+                if entropy is not None and gate.requires_grad:
+                    gate_target = entropy.clamp(0, 1).detach()
+                    loss = loss + 0.05 * F.mse_loss(gate.mean(), gate_target)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()

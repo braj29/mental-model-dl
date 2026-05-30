@@ -75,8 +75,8 @@ class LearnedGate(nn.Module):
             nn.Linear(32, 1),
         )
         self.update = nn.GRUCell(3, state_dim)
-        # start gate near 0.5 (neutral) so early training is stable
-        nn.init.zeros_(self.net[-1].weight)
+        # small random init so gate starts near 0.5 but can move immediately
+        nn.init.normal_(self.net[-1].weight, std=0.01)
         nn.init.zeros_(self.net[-1].bias)
 
     def _per_sample_features(self, logits: torch.Tensor) -> torch.Tensor:
