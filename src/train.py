@@ -77,7 +77,7 @@ def run_continual(model, train_loaders, test_loaders, class_groups, device,
     other_params = [p for p in model.parameters() if id(p) not in gate_ids]
     param_groups = [{'params': other_params, 'lr': lr}]
     if gate_params:
-        param_groups.append({'params': gate_params, 'lr': lr * 0.1})
+        param_groups.append({'params': gate_params, 'lr': lr * 0.3})
     optimizer = torch.optim.Adam(param_groups)
     T = len(train_loaders)
     R = np.zeros((T, T), dtype=np.float64)

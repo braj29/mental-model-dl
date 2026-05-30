@@ -54,8 +54,8 @@ class AdaptationHyperNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden, out_size),
         )
-        # start near zero so initial adaptation is a no-op
-        nn.init.zeros_(self.net[-1].weight)
+        # small non-zero init so the gate gets a gradient signal through delta
+        nn.init.normal_(self.net[-1].weight, std=0.01)
         nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, context: torch.Tensor):

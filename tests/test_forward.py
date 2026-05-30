@@ -37,9 +37,10 @@ def test_adaptation_toggle_changes_output():
                           gate_type="learned", use_adaptation=True)
     x, y = _random_batch()
     refined, base, _ = model(x, y)
-    # with a freshly-initialised (near-zero) hypernet, refined ~ base initially
-    assert torch.allclose(refined, base, atol=1e-4), "delta should start near zero"
-    print("[ok] zero-init adaptation is a no-op at start (stable)")
+    # hypernet uses small-scale init (std=0.01) so delta is small but non-zero
+    delta = (refined - base).abs().max().item()
+    assert delta < 0.5, f"delta too large at init ({delta:.4f}), hypernet may be unstable"
+    print(f"[ok] small-init adaptation is stable at start (max delta={delta:.4f})")
 
 
 if __name__ == "__main__":
