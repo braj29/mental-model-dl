@@ -32,7 +32,7 @@ def task_incremental_accuracy(model, loader, classes, device):
     return correct / max(total, 1)
 
 
-def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3, gate_sparsity=0.1):
+def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3, gate_sparsity=0.01):
     """Train for one task. Returns (final_loss, gate_log).
 
     gate_log is a list of mean gate values per batch (empty if model has no gate).

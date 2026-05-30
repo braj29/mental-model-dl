@@ -40,7 +40,7 @@ class HandcraftedGate(nn.Module):
     Returns a scalar gate that scales the Level 2 delta.
     """
 
-    def __init__(self, threshold: float = 0.4):
+    def __init__(self, threshold: float = 0.2):
         super().__init__()
         self.threshold = threshold
 
