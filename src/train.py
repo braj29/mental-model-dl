@@ -32,7 +32,18 @@ def task_incremental_accuracy(model, loader, classes, device):
     return correct / max(total, 1)
 
 
-def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3, gate_sparsity=0.01):
+def _reset_gate_state(model):
+    """Zero out the LearnedGate running state before each new task.
+
+    Prevents the GRU from carrying over a 'stay closed' memory from the
+    previous task, which otherwise causes immediate gate collapse.
+    """
+    for module in model.modules():
+        if hasattr(module, 'running_state'):
+            module.running_state.zero_()
+
+
+def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3):
     """Train for one task. Returns (final_loss, gate_log).
 
     gate_log is a list of mean gate values per batch (empty if model has no gate).
@@ -50,9 +61,6 @@ def train_task(model, loader, optimizer, device, epochs=1, aux_weight=0.3, gate_
             gate = info.get("gate_value")
             if gate is not None and torch.is_tensor(gate):
                 gate_log.append(float(gate.detach().mean()))
-                # penalise a learned gate that stays open — prevents collapse to always-on
-                if gate_sparsity > 0 and gate.requires_grad:
-                    loss = loss + gate_sparsity * gate
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
@@ -69,6 +77,7 @@ def run_continual(model, train_loaders, test_loaders, class_groups, device,
     gate_logs = {}
 
     for i in range(T):
+        _reset_gate_state(model)
         last_loss, gate_log = train_task(model, train_loaders[i], optimizer, device,
                                          epochs=epochs_per_task, aux_weight=aux_weight)
         gate_logs[i] = gate_log
