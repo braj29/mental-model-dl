@@ -53,12 +53,15 @@ class HandcraftedGate(nn.Module):
 class LearnedGate(nn.Module):
     """Level 3 (Paper 2): a learned self-model producing a soft adaptation gate.
 
-    Input self-state features (per batch, then pooled):
-        - mean predictive entropy            (uncertainty)
+    Computes per-sample features so uncertain samples get a higher gate value
+    than confident ones within the same batch — genuine selective gating.
+
+    Input features (per sample):
+        - predictive entropy                 (uncertainty)
         - max softmax probability            (confidence)
         - logit margin (top1 - top2)         (decision conflict)
-        - a learned running summary vector   (recurrent self-state)
-    Output: gate in [0, 1] (sigmoid), scaling the Level 2 delta smoothly.
+        - a learned running summary vector   (recurrent self-state, shared across batch)
+    Output: gate per sample in [0, 1], mean is used to scale the Level 2 delta.
     """
 
     def __init__(self, state_dim: int = 16):
@@ -76,19 +79,25 @@ class LearnedGate(nn.Module):
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
-    def _summary_features(self, logits: torch.Tensor) -> torch.Tensor:
+    def _per_sample_features(self, logits: torch.Tensor) -> torch.Tensor:
+        """Returns (B, 3) per-sample uncertainty features."""
         p = F.softmax(logits, dim=-1)
-        ent = predictive_entropy(logits).mean().view(1)
-        conf = p.max(dim=-1).values.mean().view(1)
+        ent = predictive_entropy(logits)                          # (B,)
+        conf = p.max(dim=-1).values                               # (B,)
         top2 = p.topk(2, dim=-1).values
-        margin = (top2[:, 0] - top2[:, 1]).mean().view(1)
-        return torch.cat([ent, conf, margin])      # (3,)
+        margin = top2[:, 0] - top2[:, 1]                         # (B,)
+        return torch.stack([ent, conf, margin], dim=-1)           # (B, 3)
 
     def forward(self, logits: torch.Tensor):
-        feats = self._summary_features(logits)             # (3,)
-        new_state = self.update(feats.unsqueeze(0), self.running_state.unsqueeze(0)).squeeze(0)
-        gate_in = torch.cat([feats, new_state])
-        gate = torch.sigmoid(self.net(gate_in)).squeeze()
+        feats = self._per_sample_features(logits)                 # (B, 3)
+        batch_feats = feats.mean(dim=0)                           # (3,) for GRU update
+        new_state = self.update(
+            batch_feats.unsqueeze(0), self.running_state.unsqueeze(0)
+        ).squeeze(0)                                              # (state_dim,)
+        state_expanded = new_state.unsqueeze(0).expand(feats.size(0), -1)  # (B, state_dim)
+        gate_in = torch.cat([feats, state_expanded], dim=-1)     # (B, 3+state_dim)
+        gate_per_sample = torch.sigmoid(self.net(gate_in)).squeeze(-1)  # (B,)
+        gate = gate_per_sample.mean()                            # scalar for model.py compatibility
         # update self-state (detached so it acts as slow-moving memory)
         self.running_state = new_state.detach()
-        return gate, {"entropy": feats[0].detach(), "gate": gate.detach()}
+        return gate, {"entropy": batch_feats[0].detach(), "gate": gate_per_sample.detach()}

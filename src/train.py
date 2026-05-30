@@ -71,7 +71,14 @@ def run_continual(model, train_loaders, test_loaders, class_groups, device,
                   epochs_per_task=1, lr=1e-3, aux_weight=0.3, verbose=True):
     """Returns (R, gate_logs) where gate_logs maps task_index -> list of per-batch gate values."""
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Level 3 gate learns 10x slower — prevents premature closure
+    gate_params = list(model.level3.parameters()) if getattr(model, 'level3', None) is not None else []
+    gate_ids = {id(p) for p in gate_params}
+    other_params = [p for p in model.parameters() if id(p) not in gate_ids]
+    param_groups = [{'params': other_params, 'lr': lr}]
+    if gate_params:
+        param_groups.append({'params': gate_params, 'lr': lr * 0.1})
+    optimizer = torch.optim.Adam(param_groups)
     T = len(train_loaders)
     R = np.zeros((T, T), dtype=np.float64)
     gate_logs = {}
