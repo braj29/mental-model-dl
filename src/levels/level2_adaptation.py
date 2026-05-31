@@ -57,9 +57,8 @@ class AdaptationHyperNet(nn.Module):
             nn.Linear(hidden, hidden),
             nn.ReLU(inplace=True),
         )
-        # per-slot head weight delta + shared bias delta
-        per_slot_w = num_slots * num_classes * concept_dim
-        self.head_net = nn.Linear(hidden, per_slot_w + num_classes)
+        # shared head weight delta + bias delta (per-slot gates weight it differently)
+        self.head_net = nn.Linear(hidden, num_classes * concept_dim + num_classes)
 
         nn.init.normal_(self.head_net.weight, std=0.01)
         nn.init.zeros_(self.head_net.bias)
@@ -68,17 +67,17 @@ class AdaptationHyperNet(nn.Module):
         """context: (context_dim,) or (B, context_dim) -> per-batch we average.
 
         Returns:
-            delta_w_per_slot: (num_slots, num_classes, concept_dim)
-            delta_b:          (num_classes,)
+            delta_w: (num_classes, concept_dim)  — shared; per-slot gates scale it
+            delta_b: (num_classes,)
         """
         if context.dim() == 2:
             context = context.mean(dim=0)
         h = self.backbone(context)
         flat = self.head_net(h) * self.delta_scale
-        w_size = self.num_slots * self.num_classes * self.concept_dim
-        delta_w_per_slot = flat[:w_size].view(self.num_slots, self.num_classes, self.concept_dim)
+        w_size = self.num_classes * self.concept_dim
+        delta_w = flat[:w_size].view(self.num_classes, self.concept_dim)
         delta_b = flat[w_size:]
-        return delta_w_per_slot, delta_b
+        return delta_w, delta_b
 
 
 def build_context(concept_pool: torch.Tensor, prediction_error: torch.Tensor) -> torch.Tensor:

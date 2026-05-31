@@ -93,15 +93,14 @@ class ThreeLevelNet(nn.Module):
         else:
             pred_error = -probs
         context = build_context(concept_pool, pred_error)          # (B, ctx_dim)
-        delta_w_per_slot, delta_b = self.level2(context)           # (S, C, D), (C,)
+        delta_w, delta_b = self.level2(context)                    # (C, D), (C,)
 
-        # ---- apply per-slot gated head delta (slots are never mutated) ----
-        # Effective head delta = sum over slots of gate_s * delta_w_s, normalised by S
-        S = slots.size(1)
-        # gates: (S,), delta_w_per_slot: (S, C, D) -> weighted sum -> (C, D)
-        gated_delta_w = (gates.view(S, 1, 1) * delta_w_per_slot).mean(dim=0)
+        # ---- apply per-slot gated head delta (slots never mutated) ----
+        # Mean gate across slots determines how much the shared delta is applied.
+        # Per-slot variance in gates is the selectivity signal: uncertain slots
+        # pull the mean gate higher, confident slots pull it lower.
         gate_mean = gates.mean()
-        new_w = self.level1.head_w + gated_delta_w
+        new_w = self.level1.head_w + gate_mean * delta_w
         new_b = self.level1.head_b + gate_mean * delta_b
         refined_logits = self.level1.predict_from_concepts(slots, new_w, new_b)
 
