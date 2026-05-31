@@ -8,15 +8,14 @@ own learning state (uncertainty, novelty, conflict) and uses it to gate
 adaptation -- directly mirroring the plasticity-vs-stability control in
 Bhalwankar & Treur (2021).
 
+Both gates now operate per-slot: each concept slot gets its own adaptation gate
+based on how uncertain that slot's predictions are. Slots representing familiar
+concepts stay closed (protected); slots encoding novel inputs open (adapt).
+
 Two versions are provided:
 
-  * HandcraftedGate   -- uncertainty-threshold rule. Use for Paper 1: simple,
-                         interpretable, stable. A genuine Level-3 controller
-                         whose policy is fixed rather than learned.
-
-  * LearnedGate       -- a small self-model that reads the learning state and
-                         outputs a continuous adaptation gate in [0, 1].
-                         This is the full self-modeling vision (Paper 2).
+  * HandcraftedGate   -- per-slot uncertainty-threshold rule (Paper 1).
+  * LearnedGate       -- per-slot self-model with GRU self-state (Paper 2).
 """
 
 from __future__ import annotations
@@ -27,41 +26,44 @@ import torch.nn.functional as F
 
 
 def predictive_entropy(logits: torch.Tensor) -> torch.Tensor:
-    """Normalised predictive entropy in [0, 1] -- a proxy for epistemic state."""
+    """Normalised predictive entropy in [0, 1] -- a proxy for epistemic state.
+    logits: (..., C) — works for any leading batch dimensions.
+    """
     p = F.softmax(logits, dim=-1)
     ent = -(p * (p + 1e-9).log()).sum(dim=-1)
     return ent / torch.log(torch.tensor(logits.size(-1), dtype=logits.dtype, device=logits.device))
 
 
 class HandcraftedGate(nn.Module):
-    """Level 3 (Paper 1): allow adaptation only when the model is uncertain.
+    """Level 3 (Paper 1): per-slot uncertainty-threshold gate.
 
-    gate = 1 if mean predictive entropy > threshold else 0.
-    Returns a scalar gate that scales the Level 2 delta.
+    For each slot, compute mean predictive entropy across the batch.
+    gate_s = 1 if slot_entropy_s > threshold else 0.
+    Returns (num_slots,) gate vector.
     """
 
     def __init__(self, threshold: float = 0.2):
         super().__init__()
         self.threshold = threshold
 
-    def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        ent = predictive_entropy(logits).mean()
-        gate = (ent > self.threshold).float()
-        return gate, {"entropy": ent.detach()}
+    def forward(self, per_slot_logits: torch.Tensor):
+        """per_slot_logits: (B, S, C)"""
+        B, S, C = per_slot_logits.shape
+        slot_ent = predictive_entropy(per_slot_logits.reshape(B * S, C)).reshape(B, S)
+        mean_slot_ent = slot_ent.mean(dim=0)          # (S,)
+        gates = (mean_slot_ent > self.threshold).float()
+        return gates, {"entropy": mean_slot_ent.mean().detach()}
 
 
 class LearnedGate(nn.Module):
-    """Level 3 (Paper 2): a learned self-model producing a soft adaptation gate.
+    """Level 3 (Paper 2): per-slot learned self-model gate.
 
-    Computes per-sample features so uncertain samples get a higher gate value
-    than confident ones within the same batch — genuine selective gating.
+    For each slot, computes uncertainty features (entropy, confidence, margin)
+    and uses a shared network + GRU self-state to output a per-slot gate in [0.1, 1].
+    The floor of 0.1 ensures the gate never fully closes (preserves plasticity).
 
-    Input features (per sample):
-        - predictive entropy                 (uncertainty)
-        - max softmax probability            (confidence)
-        - logit margin (top1 - top2)         (decision conflict)
-        - a learned running summary vector   (recurrent self-state, shared across batch)
-    Output: gate per sample in [0, 1], mean is used to scale the Level 2 delta.
+    GRU state is shared across slots (captures global task-novelty context)
+    but gate predictions are slot-specific (enables selective concept protection).
     """
 
     def __init__(self, state_dim: int = 16):
@@ -75,29 +77,30 @@ class LearnedGate(nn.Module):
             nn.Linear(32, 1),
         )
         self.update = nn.GRUCell(3, state_dim)
-        # small random init so gate starts near 0.5 but can move immediately
         nn.init.normal_(self.net[-1].weight, std=0.01)
         nn.init.zeros_(self.net[-1].bias)
 
-    def _per_sample_features(self, logits: torch.Tensor) -> torch.Tensor:
-        """Returns (B, 3) per-sample uncertainty features."""
-        p = F.softmax(logits, dim=-1)
-        ent = predictive_entropy(logits)                          # (B,)
-        conf = p.max(dim=-1).values                               # (B,)
-        top2 = p.topk(2, dim=-1).values
-        margin = top2[:, 0] - top2[:, 1]                         # (B,)
-        return torch.stack([ent, conf, margin], dim=-1)           # (B, 3)
+    def _per_slot_features(self, per_slot_logits: torch.Tensor) -> torch.Tensor:
+        """(B, S, C) → (S, 3) per-slot uncertainty features averaged over batch."""
+        B, S, C = per_slot_logits.shape
+        flat = per_slot_logits.reshape(B * S, C)
+        p = F.softmax(flat, dim=-1)
+        ent = predictive_entropy(flat).reshape(B, S).mean(0)      # (S,)
+        conf = p.max(dim=-1).values.reshape(B, S).mean(0)         # (S,)
+        top2 = p.topk(2, dim=-1).values.reshape(B, S, 2)
+        margin = (top2[:, :, 0] - top2[:, :, 1]).mean(0)          # (S,)
+        return torch.stack([ent, conf, margin], dim=-1)             # (S, 3)
 
-    def forward(self, logits: torch.Tensor):
-        feats = self._per_sample_features(logits)                 # (B, 3)
-        batch_feats = feats.mean(dim=0)                           # (3,) for GRU update
+    def forward(self, per_slot_logits: torch.Tensor):
+        """per_slot_logits: (B, S, C)"""
+        feats = self._per_slot_features(per_slot_logits)            # (S, 3)
+        batch_feats = feats.mean(dim=0)                             # (3,) for GRU
         new_state = self.update(
             batch_feats.unsqueeze(0), self.running_state.unsqueeze(0)
-        ).squeeze(0)                                              # (state_dim,)
-        state_expanded = new_state.unsqueeze(0).expand(feats.size(0), -1)  # (B, state_dim)
-        gate_in = torch.cat([feats, state_expanded], dim=-1)     # (B, 3+state_dim)
-        gate_per_sample = torch.sigmoid(self.net(gate_in)).squeeze(-1)  # (B,)
-        gate = 0.1 + 0.9 * gate_per_sample.mean()               # floor at 0.1 — never fully closes
-        # update self-state (detached so it acts as slow-moving memory)
+        ).squeeze(0)
+        state_exp = new_state.unsqueeze(0).expand(feats.size(0), -1)  # (S, state_dim)
+        gate_in = torch.cat([feats, state_exp], dim=-1)              # (S, 3+state_dim)
+        gate_per_slot = torch.sigmoid(self.net(gate_in)).squeeze(-1) # (S,)
+        gate = 0.1 + 0.9 * gate_per_slot                            # floor at 0.1
         self.running_state = new_state.detach()
-        return gate, {"entropy": batch_feats[0].detach(), "gate": gate_per_sample.detach()}
+        return gate, {"entropy": batch_feats[0].detach(), "gate": gate_per_slot.detach()}

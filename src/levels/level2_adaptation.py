@@ -5,7 +5,7 @@ Level 2 — Adaptation (First-order mental model change)
 Level 2 is the process that *changes* the Level 1 mental model in response to
 experience. Instead of changing Level 1 weights via ordinary backprop alone,
 a hypernetwork generates a task/context-conditioned set of weights for the
-Level 1 classifier head.
+Level 1 classifier head AND per-slot concept adjustments.
 
 The crucial design choice that distinguishes this from von Oswald et al. (2020):
 the hypernetwork is conditioned NOT on a task ID, but on the *current state of
@@ -25,12 +25,16 @@ import torch.nn as nn
 
 
 class AdaptationHyperNet(nn.Module):
-    """Generates (delta) weights for the Level 1 classifier head.
+    """Generates (delta) weights for the Level 1 classifier head and concept slots.
 
-    Given a context vector summarising the mental model's current state, it
-    outputs a weight matrix and bias for the head. We generate a *delta* that
-    is added to the resident head weights, which empirically trains far more
-    stably than generating weights from scratch.
+    Two output heads sharing a backbone:
+      - head_net: delta_w (num_classes × concept_dim) and delta_b (num_classes,)
+        for the classifier head — controls how predictions are made.
+      - slot_net: delta_slots (num_slots × concept_dim)
+        for the slot representations — controls what concepts are formed.
+
+    Per-slot deltas let Level 3 gate adaptation selectively per concept,
+    rather than all-or-nothing on the entire head.
     """
 
     def __init__(
@@ -38,38 +42,49 @@ class AdaptationHyperNet(nn.Module):
         context_dim: int,
         num_classes: int,
         concept_dim: int,
+        num_slots: int,
         hidden: int = 128,
         delta_scale: float = 0.1,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.concept_dim = concept_dim
+        self.num_slots = num_slots
         self.delta_scale = delta_scale
 
-        out_size = num_classes * concept_dim + num_classes   # weight + bias
-        self.net = nn.Sequential(
+        self.backbone = nn.Sequential(
             nn.Linear(context_dim, hidden),
             nn.ReLU(inplace=True),
             nn.Linear(hidden, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, out_size),
         )
-        # small non-zero init so the gate gets a gradient signal through delta
-        nn.init.normal_(self.net[-1].weight, std=0.01)
-        nn.init.zeros_(self.net[-1].bias)
+        head_out = num_classes * concept_dim + num_classes
+        self.head_net = nn.Linear(hidden, head_out)
+        self.slot_net = nn.Linear(hidden, num_slots * concept_dim)
+
+        # small non-zero init — gives gate a gradient signal while keeping deltas small
+        nn.init.normal_(self.head_net.weight, std=0.01)
+        nn.init.zeros_(self.head_net.bias)
+        nn.init.normal_(self.slot_net.weight, std=0.01)
+        nn.init.zeros_(self.slot_net.bias)
 
     def forward(self, context: torch.Tensor):
         """context: (context_dim,) or (B, context_dim) -> per-batch we average.
 
-        Returns delta_w: (num_classes, concept_dim), delta_b: (num_classes,)
+        Returns:
+            delta_w:     (num_classes, concept_dim)
+            delta_b:     (num_classes,)
+            delta_slots: (num_slots, concept_dim)
         """
         if context.dim() == 2:
-            context = context.mean(dim=0)     # one shared update per batch
-        out = self.net(context) * self.delta_scale
+            context = context.mean(dim=0)
+        h = self.backbone(context)
+        flat = self.head_net(h) * self.delta_scale
         w_size = self.num_classes * self.concept_dim
-        delta_w = out[:w_size].view(self.num_classes, self.concept_dim)
-        delta_b = out[w_size:]
-        return delta_w, delta_b
+        delta_w = flat[:w_size].view(self.num_classes, self.concept_dim)
+        delta_b = flat[w_size:]
+        delta_slots = self.slot_net(h).view(self.num_slots, self.concept_dim) * self.delta_scale
+        return delta_w, delta_b, delta_slots
 
 
 def build_context(concept_pool: torch.Tensor, prediction_error: torch.Tensor) -> torch.Tensor:

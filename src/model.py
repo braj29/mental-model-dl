@@ -5,16 +5,15 @@ The Three-Level Mental Model Network
 Combines:
     Level 1 (ConceptLayer)        -- the mental model that is used
     Level 2 (AdaptationHyperNet)  -- generates weight deltas to adapt Level 1
-    Level 3 (Handcrafted/Learned) -- gates how much Level 2 is applied
+    Level 3 (Handcrafted/Learned) -- gates how much Level 2 is applied, per slot
 
 Forward pass:
-    1. Level 1 forms concepts and makes a *base* prediction.
-    2. Level 3 inspects the prediction to decide an adaptation gate.
-    3. Level 2 generates a head-weight delta from the mental-model state.
-    4. The gated delta is applied; a refined prediction is produced.
-
-Both predictions are returned so the training loop can optionally supervise the
-base prediction, the refined one, or both.
+    1. Level 1 forms concept slots and makes a *base* prediction.
+    2. Level 3 inspects per-slot predictions to compute per-slot adaptation gates.
+    3. Level 2 generates a head-weight delta and per-slot slot deltas.
+    4. Each slot is adapted by its own gate × slot delta.
+    5. The adapted slots are pooled; the head delta (scaled by mean gate) is applied.
+    6. Both base and refined predictions are returned.
 """
 
 from __future__ import annotations
@@ -42,6 +41,7 @@ class ThreeLevelNet(nn.Module):
         super().__init__()
         self.use_adaptation = use_adaptation
         self.num_classes = num_classes
+        self.num_slots = num_slots
 
         # Level 1
         self.level1 = ConceptLayer(
@@ -49,10 +49,11 @@ class ThreeLevelNet(nn.Module):
             dim=concept_dim, in_channels=in_channels,
         )
 
-        # Level 2
+        # Level 2 — now generates both head delta and per-slot deltas
         context_dim = concept_dim + num_classes
         self.level2 = AdaptationHyperNet(
-            context_dim=context_dim, num_classes=num_classes, concept_dim=concept_dim,
+            context_dim=context_dim, num_classes=num_classes,
+            concept_dim=concept_dim, num_slots=num_slots,
         )
 
         # Level 3
@@ -66,36 +67,43 @@ class ThreeLevelNet(nn.Module):
             raise ValueError(f"unknown gate_type {gate_type}")
 
     def forward(self, x: torch.Tensor, y: torch.Tensor | None = None):
-        # ---- Level 1: form concepts + base prediction ----
-        slots = self.level1.concepts(x)                       # (B, S, D)
-        base_logits = self.level1.predict_from_concepts(slots)
-        concept_pool = slots.mean(dim=1)                      # (B, D)
+        # ---- Level 1: form concept slots + base prediction ----
+        slots = self.level1.concepts(x)                            # (B, S, D)
+        base_logits = self.level1.predict_from_concepts(slots)     # (B, C)
+        concept_pool = slots.mean(dim=1)                           # (B, D)
 
         info = {"base_logits": base_logits}
 
         if not self.use_adaptation or self.level3 is None:
             return base_logits, base_logits, info
 
-        # ---- Level 3: decide adaptation gate from self-state ----
-        gate, gate_info = self.level3(base_logits)
+        # ---- Level 3: per-slot gate from each slot's prediction uncertainty ----
+        per_slot_logits = F.linear(
+            slots, self.level1.head_w, self.level1.head_b
+        )                                                          # (B, S, C)
+        gates, gate_info = self.level3(per_slot_logits)            # (S,)
         info.update(gate_info)
 
-        # ---- Level 2: generate weight delta from mental-model state ----
-        # prediction error proxy: 1 - softmax (or true error if y provided)
+        # ---- Level 2: head delta + per-slot concept deltas ----
         with torch.no_grad():
             probs = F.softmax(base_logits, dim=-1)
         if y is not None:
             onehot = F.one_hot(y, self.num_classes).float()
-            pred_error = onehot - probs                       # signed error
+            pred_error = onehot - probs
         else:
-            pred_error = -probs                               # uncertainty signal
-        context = build_context(concept_pool, pred_error)     # (B, ctx_dim)
-        delta_w, delta_b = self.level2(context)
+            pred_error = -probs
+        context = build_context(concept_pool, pred_error)          # (B, ctx_dim)
+        delta_w, delta_b, delta_slots = self.level2(context)       # head + slot deltas
 
-        # ---- apply gated delta to Level 1 head ----
-        new_w = self.level1.head_w + gate * delta_w
-        new_b = self.level1.head_b + gate * delta_b
-        refined_logits = self.level1.predict_from_concepts(slots, new_w, new_b)
+        # ---- apply per-slot deltas to concept slots ----
+        S = slots.size(1)
+        adapted_slots = slots + gates.view(1, S, 1) * delta_slots.unsqueeze(0)  # (B, S, D)
 
-        info["gate_value"] = gate  # kept with grad for sparsity penalty; detach in logging if needed
+        # ---- apply head delta (scaled by mean gate) ----
+        gate_mean = gates.mean()
+        new_w = self.level1.head_w + gate_mean * delta_w
+        new_b = self.level1.head_b + gate_mean * delta_b
+        refined_logits = self.level1.predict_from_concepts(adapted_slots, new_w, new_b)
+
+        info["gate_value"] = gate_mean
         return refined_logits, base_logits, info
